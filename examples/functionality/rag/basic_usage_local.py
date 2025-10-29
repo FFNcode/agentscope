@@ -11,33 +11,36 @@ from agentscope.rag import (
     SimpleKnowledge,
 )
 
-
-async def main() -> None:
-    """The main entry point of the RAG example."""
-
-    # Create readers with chunking arguments
-    reader = TextReader(chunk_size=1024)
-    pdf_reader = PDFReader(chunk_size=1024, split_by="sentence")
-
-    # Read documents
-    documents = await reader(
-        text="I'm Tony Stank, my password is 123456. My best friend is James "
-        "Rhodes.",
+async def create_knowledge_base(
+    force_rebuild: bool = False,
+) -> SimpleKnowledge:
+    """
+    Create and populate the knowledge base with documents.
+    
+    This function:
+    1. Creates the knowledge base with Qdrant and DashScope embedding
+    2. Checks if data already exists
+    3. Reads and adds documents if needed
+    
+    Args:
+        force_rebuild: If True, rebuild the knowledge base even if data exists.
+        
+    Returns:
+        The created knowledge base instance.
+    """
+    collection_name = "rag_knowledge_base"
+    # Setup paths
+    qdrant_data_path = os.path.join(
+        os.path.dirname(__file__),
+        "qdrant_data",
     )
-
-    # Read a sample PDF file
-    pdf_path = os.path.join(
-        os.path.abspath(os.path.dirname(__file__)),
-        "example.pdf",
-    )
-    pdf_documents = await pdf_reader(pdf_path=pdf_path)
-
-    # Create a knowledge base with Qdrant as the embedding store and
+    
+    # Create knowledge base with Qdrant as the embedding store and
     # DashScope as the embedding model
     knowledge = SimpleKnowledge(
         embedding_store=QdrantStore(
-            location=":memory:",
-            collection_name="test_collection",
+            location=qdrant_data_path,  # Local storage path
+            collection_name=collection_name,
             dimensions=1024,  # The dimension of the embedding vectors
         ),
         embedding_model=DashScopeTextEmbedding(
@@ -45,9 +48,65 @@ async def main() -> None:
             model_name="text-embedding-v4",
         ),
     )
-
+    
+    # Check if data already exists
+    try:
+        store_client = knowledge.embedding_store.get_client()
+        collection_info = await store_client.get_collection(collection_name)
+        points_count = collection_info.points_count
+        
+        if points_count > 0 and not force_rebuild:
+            print(f"Knowledge base already exists with {points_count} documents.")
+            print("Skipping data creation. Set force_rebuild=True to rebuild.")
+            return knowledge
+        
+        if force_rebuild and points_count > 0:
+            print(f"Deleting existing collection with {points_count} documents...")
+            await store_client.delete_collection(collection_name)
+            print("Collection deleted. Rebuilding...")
+    except Exception:
+        # Collection doesn't exist, need to create
+        print("Collection does not exist. Will create during document addition.")
+    
+    print("Creating knowledge base with documents...")
+    
+    # Create readers with chunking arguments
+    reader = TextReader(chunk_size=1024)
+    pdf_reader = PDFReader(chunk_size=1024, split_by="sentence")
+    
+    # Read documents
+    print("Reading text documents...")
+    documents = await reader(
+        text="I'm Tony Stank, my password is 123456. My best friend is James "
+        "Rhodes.",
+    )
+    
+    # Read a sample PDF file
+    pdf_path = os.path.join(
+        os.path.abspath(os.path.dirname(__file__)),
+        "example.pdf",
+    )
+    pdf_documents = []
+    if os.path.exists(pdf_path):
+        print("Reading PDF documents...")
+        pdf_documents = await pdf_reader(pdf_path=pdf_path)
+    else:
+        print(f"Warning: PDF file not found at {pdf_path}, skipping PDF documents.")
+    
     # Insert documents into the knowledge base
-    await knowledge.add_documents(documents + pdf_documents)
+    all_documents = documents + pdf_documents
+    print(f"Adding {len(all_documents)} documents to knowledge base...")
+    await knowledge.add_documents(all_documents)
+    print(f"Knowledge base created successfully with {len(all_documents)} documents.")
+    
+    return knowledge
+
+
+async def main() -> None:
+    """The main entry point of the RAG example."""
+    
+    # Create knowledge base (will skip if data already exists)
+    knowledge = await create_knowledge_base(force_rebuild=False)
 
     # Retrieve relevant documents based on a given query
     docs = await knowledge.retrieve(
