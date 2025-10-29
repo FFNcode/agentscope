@@ -14,54 +14,58 @@ Markdown 文件向量化处理示例
 import os
 import re
 import asyncio
-from typing import List, Dict
+from typing import List, Dict, Optional
 from qdrant_client import QdrantClient, models
 from qdrant_client.models import PointStruct
-
-# 可以选择使用本地嵌入模型或 API 嵌入模型
-try:
-    from sentence_transformers import SentenceTransformer
-    USE_LOCAL_EMBEDDING = True
-except ImportError:
-    USE_LOCAL_EMBEDDING = False
-    print("未安装 sentence-transformers，将尝试使用 OpenAI 嵌入模型")
-    try:
-        from openai import OpenAI
-        OPENAI_CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    except Exception:
-        OPENAI_CLIENT = None
+from agentscope.embedding import DashScopeTextEmbedding
 
 
 class MDProcessor:
     def __init__(
         self,
         file_path: str,
-        qdrant_url: str = "http://localhost:6333",
+        qdrant_path: Optional[str] = None,
         collection_name: str = "md_documents",
-        embedding_model_name: str = "all-MiniLM-L6-v2",  # sentence-transformers 模型
+        api_key: Optional[str] = None,
+        model_name: str = "text-embedding-v4",
+        dimensions: int = 1024,
     ):
         """
         初始化 Markdown 处理器
         
         Args:
             file_path: Markdown 文件路径
-            qdrant_url: Qdrant 服务器地址
+            qdrant_path: Qdrant 本地存储路径，如果为 None 则使用默认路径
             collection_name: 集合名称
-            embedding_model_name: 嵌入模型名称
+            api_key: DashScope API Key，如果为 None 则从环境变量获取
+            model_name: DashScope 嵌入模型名称，默认为 "text-embedding-v4"
+            dimensions: 向量维度，默认为 1024
         """
         self.file_path = file_path
-        self.client = QdrantClient(url=qdrant_url)
+        
+        # 默认使用当前目录下的 qdrant_data 目录
+        if qdrant_path is None:
+            qdrant_path = os.path.join(os.path.dirname(__file__), "qdrant_data")
+        
+        print(f"使用本地 Qdrant 存储: {qdrant_path}")
+        self.client = QdrantClient(path=qdrant_path)
         self.collection_name = collection_name
         
-        # 初始化嵌入模型
-        if USE_LOCAL_EMBEDDING:
-            print(f"加载本地嵌入模型: {embedding_model_name}")
-            self.embedding_model = SentenceTransformer(embedding_model_name)
-            self.vector_size = self.embedding_model.get_sentence_embedding_dimension()
-        else:
-            self.embedding_model = None
-            # 如果使用 OpenAI，默认维度是 1536 (text-embedding-ada-002) 或 1536 (text-embedding-3-small)
-            self.vector_size = 1536
+        # 初始化 DashScope 嵌入模型
+        if api_key is None:
+            api_key = os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "请设置 DASHSCOPE_API_KEY 环境变量或传入 api_key 参数"
+                )
+        
+        print(f"初始化 DashScope 嵌入模型: {model_name}, 维度: {dimensions}")
+        self.embedding_model = DashScopeTextEmbedding(
+            api_key=api_key,
+            model_name=model_name,
+            dimensions=dimensions,
+        )
+        self.vector_size = dimensions
         
         self.sections: List[Dict[str, str]] = []
 
@@ -142,26 +146,16 @@ class MDProcessor:
         """
         print(f"\n正在将 {len(texts)} 个文本转换为向量...")
         
-        if USE_LOCAL_EMBEDDING and self.embedding_model:
-            # 使用本地模型
-            vectors = self.embedding_model.encode(texts, show_progress_bar=True)
-            vectors = vectors.tolist() if hasattr(vectors, 'tolist') else vectors
-        elif OPENAI_CLIENT:
-            # 使用 OpenAI API
-            response = OPENAI_CLIENT.embeddings.create(
-                model="text-embedding-3-small",
-                input=texts
-            )
-            vectors = [item.embedding for item in response.data]
-            self.vector_size = len(vectors[0]) if vectors else 1536
-        else:
-            error_msg = (
-                "未找到可用的嵌入模型。请安装 sentence-transformers "
-                "或设置 OPENAI_API_KEY 环境变量"
-            )
-            raise ValueError(error_msg)
+        # 使用 DashScope 嵌入模型
+        response = await self.embedding_model(texts)
+        
+        # response.embeddings 已经是 List[List[float]] 类型
+        vectors = response.embeddings
         
         print(f"向量转换完成，向量维度: {self.vector_size}")
+        if response.usage and response.usage.tokens:
+            print(f"Token 使用: {response.usage.tokens}")
+        
         return vectors
 
     def ensure_collection(self):
@@ -180,6 +174,21 @@ class MDProcessor:
             print(f"集合 '{self.collection_name}' 不存在，正在创建...")
             self.create_collection()
 
+    def check_collection_has_data(self) -> bool:
+        """检查集合是否已有数据"""
+        try:
+            collection_info = self.client.get_collection(self.collection_name)
+            points_count = collection_info.points_count
+            if points_count > 0:
+                print(f"集合 '{self.collection_name}' 已有 {points_count} 条数据")
+                return True
+            else:
+                print(f"集合 '{self.collection_name}' 存在但无数据")
+                return False
+        except Exception:
+            print(f"集合 '{self.collection_name}' 不存在")
+            return False
+
     def create_collection(self):
         """创建集合"""
         self.client.create_collection(
@@ -191,10 +200,20 @@ class MDProcessor:
         )
         print(f"集合 '{self.collection_name}' 创建成功 (维度: {self.vector_size})")
 
-    async def store_to_vector_database(self) -> None:
-        """将向量存储到向量数据库"""
+    async def store_to_vector_database(self, force: bool = False) -> None:
+        """
+        将向量存储到向量数据库
+        
+        Args:
+            force: 如果为 True，即使数据已存在也重新存储
+        """
         if not self.sections:
             print("没有可存储的数据，请先提取标题和内容")
+            return
+        
+        # 检查是否已有数据
+        if not force and self.check_collection_has_data():
+            print("数据已存在，跳过存储。如需重新存储，请设置 force=True")
             return
         
         print("\n正在存储向量到数据库...")
@@ -286,16 +305,28 @@ class MDProcessor:
             print(f"  内容预览: {result['content'][:200]}...")
             print("-" * 80)
 
-    async def process(self) -> None:
-        """执行完整的处理流程"""
-        # Step 1: 读取文件
-        content = self.read_md_file()
+    async def process(self, force_rebuild: bool = False) -> None:
+        """
+        执行完整的处理流程
         
-        # Step 2: 提取标题和内容
-        self.extract_title_and_content(content)
+        Args:
+            force_rebuild: 如果为 True，强制重新处理并存储数据
+        """
+        # 检查是否已有数据
+        has_data = self.check_collection_has_data()
         
-        # Step 3-4: 转换为向量并存储到数据库
-        await self.store_to_vector_database()
+        if has_data and not force_rebuild:
+            print("\n数据已存在，跳过存储步骤")
+            print("如需重新处理，请设置 force_rebuild=True")
+        else:
+            # Step 1: 读取文件
+            content = self.read_md_file()
+            
+            # Step 2: 提取标题和内容
+            self.extract_title_and_content(content)
+            
+            # Step 3-4: 转换为向量并存储到数据库
+            await self.store_to_vector_database(force=force_rebuild)
         
         # Step 5-6: 演示搜索功能
         print("\n" + "=" * 80)
@@ -329,7 +360,10 @@ async def main():
     
     # 创建处理器并执行
     processor = MDProcessor(file_path=file_path)
-    await processor.process()
+    
+    # 如果数据已存在，只执行一次存储，后续直接使用
+    # force_rebuild=True 可以强制重新处理数据
+    await processor.process(force_rebuild=False)
     
     # 交互式搜索
     print("\n" + "=" * 80)

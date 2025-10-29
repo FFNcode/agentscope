@@ -2,8 +2,11 @@
 """Qdrant 基本操作示例"""
 
 from qdrant_client import QdrantClient, models
+import os
 
-client = QdrantClient(url="http://localhost:6333")
+# 使用本地存储，数据持久化到 qdrant_data 目录
+QDANT_DATA_PATH = os.path.join(os.path.dirname(__file__), "qdrant_data")
+client = QdrantClient(path=QDANT_DATA_PATH)
 collection_name = "test_collection"
 
 # 向量配置
