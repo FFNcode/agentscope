@@ -38,7 +38,7 @@ def create_collection():
     print(f"集合 '{collection_name}' 创建成功")
 
 
-def main():
+def init():
     # 确保集合存在且配置正确
     # 如果需要强制删除重建，设置 recreate=True
     ensure_collection(recreate=False)
@@ -82,7 +82,9 @@ def main():
         ],
     )
     print(f"添加完成: {operation_info}")
+    return
 
+def main():
     # 搜索相似的向量
     print("\n搜索相似向量...")
     search_result = client.query_points(
