@@ -29,14 +29,6 @@ async def create_knowledge_base(
         The created knowledge base instance.
     """
     collection_name = "rag_knowledge_base"
-    # Setup paths - ensure absolute path for local storage
-    qdrant_data_path = os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "qdrant_data",
-        )
-    )
-    
     # Create knowledge base with Qdrant as the embedding store and
     # DashScope as the embedding model
     knowledge = SimpleKnowledge(
@@ -50,6 +42,7 @@ async def create_knowledge_base(
             model_name="text-embedding-v4",
         ),
     )
+    return knowledge
     
     # Skip collection check for local storage to avoid connection errors
     # QdrantStore will automatically create the collection when adding documents
