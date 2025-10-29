@@ -10,7 +10,8 @@ mcp = FastMCP("Add", port=8001)
 @mcp.tool()
 def add(a: int, b: int) -> int:
     """Add two numbers."""
+    print(f"Adding {a} and {b}...\n")
     return a + b
 
-
-mcp.run(transport="sse")
+if __name__ == '__main__':
+    mcp.run(transport="sse")
